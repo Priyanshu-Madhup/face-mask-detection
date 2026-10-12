@@ -1,2 +1,5 @@
 # Python virtual environments
 venv
+
+# Local run artifacts
+streamlit_log.txt
