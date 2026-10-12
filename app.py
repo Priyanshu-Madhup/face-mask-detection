@@ -14,7 +14,7 @@ from tensorflow.keras.applications.mobilenet_v2 import preprocess_input
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import load_model
 
-st.set_page_config(page_title='Face Mask Detector', page_icon='😷', layout='centered', initial_sidebar_state='expanded')
+st.set_page_config(page_title="Priyanshu's Face Mask Detection Software", page_icon='😷', layout='centered', initial_sidebar_state='expanded')
 
 
 def local_css(file_name):
@@ -87,7 +87,7 @@ def mask_image(image_bgr):
 
 def mask_detection():
     local_css("css/styles.css")
-    st.markdown('<h1 align="center">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 align="center">😷 Priyanshu\'s Face Mask Detection Software</h1>', unsafe_allow_html=True)
     activities = ["Image", "Webcam"]
     st.sidebar.markdown("# Mask Detection on?")
     choice = st.sidebar.selectbox("Choose among the given options:", activities)
