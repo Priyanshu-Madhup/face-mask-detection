@@ -35,51 +35,97 @@ def load_mask_model():
     return load_model("mask_detector.model")
 
 
+@st.cache_resource
+def load_yolo_detector():
+    """Load a YOLO face detector if ultralytics and the weights are available.
+    Weights path can be overridden with the YOLO_FACE_WEIGHTS env var.
+    Returns None when unavailable so the app falls back to the SSD detector."""
+    weights = os.environ.get("YOLO_FACE_WEIGHTS", "yolov8n-face.pt")
+    if not os.path.exists(weights):
+        return None
+    try:
+        from ultralytics import YOLO
+        return YOLO(weights)
+    except ImportError:
+        return None
+
+
+def detect_faces_ssd(net, image, conf_thresh=0.5):
+    """OpenCV res10 SSD face detector. Returns list of (x1, y1, x2, y2, conf)."""
+    (h, w) = image.shape[:2]
+    blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300), (104.0, 177.0, 123.0))
+    net.setInput(blob)
+    detections = net.forward()
+    boxes = []
+    for i in range(detections.shape[2]):
+        confidence = float(detections[0, 0, i, 2])
+        if confidence > conf_thresh:
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            boxes.append((*box.astype("int").tolist(), confidence))
+    return boxes
+
+
+def detect_faces_yolo(yolo, image, conf_thresh=0.4):
+    """YOLO face detector. Returns list of (x1, y1, x2, y2, conf)."""
+    result = yolo.predict(image, conf=conf_thresh, verbose=False)[0]
+    boxes = []
+    for xyxy, conf in zip(result.boxes.xyxy.cpu().numpy(), result.boxes.conf.cpu().numpy()):
+        boxes.append((*xyxy.astype("int").tolist(), float(conf)))
+    return boxes
+
+
+def merge_detections(boxes, iou_thresh=0.45):
+    """Hybrid fusion: union of YOLO + SSD boxes, de-duplicated with NMS."""
+    if not boxes:
+        return []
+    rects = [[x1, y1, x2 - x1, y2 - y1] for (x1, y1, x2, y2, _) in boxes]
+    scores = [b[4] for b in boxes]
+    keep = cv2.dnn.NMSBoxes(rects, scores, 0.0, iou_thresh)
+    return [boxes[i] for i in np.array(keep).flatten()]
+
+
 def mask_image(image_bgr):
-    """Run face detection + mask classification on a BGR image (numpy array).
+    """Hybrid pipeline: YOLO + SSD face detection, fused with NMS, then
+    MobileNetV2 mask classification on each face crop.
     Returns an RGB image with annotations and the number of faces found."""
     net = load_face_detector()
+    yolo = load_yolo_detector()
     model = load_mask_model()
 
     image = image_bgr.copy()
     (h, w) = image.shape[:2]
 
-    blob = cv2.dnn.blobFromImage(image, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    net.setInput(blob)
-    detections = net.forward()
+    boxes = detect_faces_ssd(net, image)
+    if yolo is not None:
+        boxes += detect_faces_yolo(yolo, image)
+    boxes = merge_detections(boxes)
 
     faces_found = 0
-    for i in range(0, detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
+    for (startX, startY, endX, endY, _) in boxes:
+        (startX, startY) = (max(0, startX), max(0, startY))
+        (endX, endY) = (min(w - 1, endX), min(h - 1, endY))
 
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            (startX, startY, endX, endY) = box.astype("int")
+        face = image[startY:endY, startX:endX]
+        if face.size == 0:
+            continue
+        faces_found += 1
 
-            (startX, startY) = (max(0, startX), max(0, startY))
-            (endX, endY) = (min(w - 1, endX), min(h - 1, endY))
+        face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
+        face = cv2.resize(face, (224, 224))
+        face = img_to_array(face)
+        face = preprocess_input(face)
+        face = np.expand_dims(face, axis=0)
 
-            face = image[startY:endY, startX:endX]
-            if face.size == 0:
-                continue
-            faces_found += 1
+        (mask, withoutMask) = model.predict(face, verbose=0)[0]
 
-            face = cv2.cvtColor(face, cv2.COLOR_BGR2RGB)
-            face = cv2.resize(face, (224, 224))
-            face = img_to_array(face)
-            face = preprocess_input(face)
-            face = np.expand_dims(face, axis=0)
+        label = "Mask" if mask > withoutMask else "No Mask"
+        color = (0, 255, 0) if label == "Mask" else (0, 0, 255)
 
-            (mask, withoutMask) = model.predict(face, verbose=0)[0]
+        label = "{}: {:.2f}%".format(label, max(mask, withoutMask) * 100)
 
-            label = "Mask" if mask > withoutMask else "No Mask"
-            color = (0, 255, 0) if label == "Mask" else (0, 0, 255)
-
-            label = "{}: {:.2f}%".format(label, max(mask, withoutMask) * 100)
-
-            cv2.putText(image, label, (startX, startY - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
-            cv2.rectangle(image, (startX, startY), (endX, endY), color, 2)
+        cv2.putText(image, label, (startX, startY - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 2)
+        cv2.rectangle(image, (startX, startY), (endX, endY), color, 2)
 
     rgb_img = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     return rgb_img, faces_found
